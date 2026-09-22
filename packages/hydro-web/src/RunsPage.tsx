@@ -1,20 +1,20 @@
 import { useState } from "react";
-import { type AgentRun, agentStatusLabel, apiUrl, runDisplayTitle } from "./platform.ts";
+import { type AgentRunSummary, agentStatusLabel, apiUrl, runDisplayTitle } from "./platform.ts";
 
 export type RunsLoadStatus = "idle" | "loading" | "loaded" | "error";
 
 interface RunsPageProps {
 	apiOrigin: string;
-	runs: readonly AgentRun[];
+	runs: readonly AgentRunSummary[];
 	status: RunsLoadStatus;
 	message: string;
 	onRefresh: () => void;
-	onOpenRun: (run: AgentRun) => void;
-	onDeleteRun: (run: AgentRun) => void;
+	onOpenRun: (run: AgentRunSummary) => void;
+	onDeleteRun: (run: AgentRunSummary) => void;
 	deletingRunIds: readonly string[];
 }
 
-function statusClass(run: AgentRun): string {
+function statusClass(run: AgentRunSummary): string {
 	if (run.status === "succeeded") return "passed";
 	if (run.status === "failed" || run.status === "cancelled") return "failed";
 	if (run.status === "needs_input") return "attention";
@@ -36,7 +36,7 @@ function formatTimestamp(value: string): string {
 }
 
 export function RunsPage(props: RunsPageProps) {
-	const [runPendingDeletion, setRunPendingDeletion] = useState<AgentRun>();
+	const [runPendingDeletion, setRunPendingDeletion] = useState<AgentRunSummary>();
 	return (
 		<>
 			<main className="page runs-page" id="runs">

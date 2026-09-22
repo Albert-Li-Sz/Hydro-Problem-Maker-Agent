@@ -30,18 +30,22 @@ describe("platform navigation and API configuration", () => {
 				{
 					id: "run-1",
 					status: "succeeded",
-					source: "# 制题请求\n\n- 建议题目名称：A + B\n",
+					title: "A + B",
+					sourcePreview: "制题请求 A + B",
 					createdAt: "2026-09-22T07:00:00.000Z",
 					updatedAt: "2026-09-22T07:01:00.000Z",
-					assistantText: "Done",
+					lastEventSequence: 3,
 				},
 			],
 		});
 		expect(runs).toHaveLength(1);
 		expect(runDisplayTitle(runs[0])).toBe("A + B");
-		expect(runDisplayTitle({ ...runs[0], source: "- 建议题目名称：A + B\n\n## 用户提供的题面\n\n# 三连击\n" })).toBe(
-			"三连击",
-		);
+		expect(
+			runDisplayTitle({
+				...runs[0],
+				source: "- 建议题目名称：A + B\n\n## 用户提供的题面\n\n# 三连击\n",
+			}),
+		).toBe("三连击");
 		expect(readAgentRunList({ runs: [{ id: 42 }] })).toEqual([]);
 	});
 
@@ -63,10 +67,11 @@ describe("platform navigation and API configuration", () => {
 				{
 					id: "verified-run",
 					status: "succeeded",
-					source: "# Verified",
+					title: "Verified",
+					sourcePreview: "Verified",
 					createdAt: "2026-09-22T07:00:00.000Z",
 					updatedAt: "2026-09-22T07:01:00.000Z",
-					assistantText: "Done",
+					lastEventSequence: 4,
 					artifact: {
 						slug: "verified",
 						report: { valid: true, issues: [] },
@@ -80,7 +85,6 @@ describe("platform navigation and API configuration", () => {
 							checker: "default",
 							checkerProbes: 0,
 							wrongPrograms: 2,
-							checks: [],
 						},
 					},
 				},

@@ -1,12 +1,8 @@
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import { AgentRunPanel } from "./AgentRunPanel.tsx";
 import {
 	type AgentRun,
 	type AgentRunStatus,
+	type AgentRunSummary,
 	type ApiStatus,
 	agentStatusLabel,
 	algorithmValidationPresentation,
@@ -35,9 +31,12 @@ import {
 import { ReferenceProgramEditor } from "./ReferenceProgramEditor.tsx";
 import { type RunsLoadStatus, RunsPage } from "./RunsPage.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
+import { ValidationTab } from "./ValidationTab.tsx";
+import { StatementEditor, TestDataEditor } from "./WorkspaceEditors.tsx";
+import { WorkspaceSidebar } from "./WorkspaceSidebar.tsx";
 
 type WorkspaceTab = "statement" | "tests" | "reference" | "validation";
-type BusyAction = "validate" | "download" | "agent" | "continue" | undefined;
+type BusyAction = "validate" | "download" | "agent" | "continue" | "live" | undefined;
 
 const apiOriginStorageKey = "hydro-problem-make.api-origin";
 
@@ -117,10 +116,14 @@ export function App() {
 	const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
 	const [agentAvailable, setAgentAvailable] = useState(false);
 	const [agentModels, setAgentModels] = useState<string[]>([]);
+	const [liveHydro, setLiveHydro] = useState<{ configured: boolean; message: string }>({
+		configured: false,
+		message: "尚未配置测试实例",
+	});
 	const [connectionMessage, setConnectionMessage] = useState("正在连接平台 API……");
 	const [agentRun, setAgentRun] = useState<AgentRun>();
 	const [continuationDrafts, setContinuationDrafts] = useState<Record<string, string>>({});
-	const [runs, setRuns] = useState<AgentRun[]>([]);
+	const [runs, setRuns] = useState<AgentRunSummary[]>([]);
 	const [runsStatus, setRunsStatus] = useState<RunsLoadStatus>("idle");
 	const [runsMessage, setRunsMessage] = useState("");
 	const [deletingRunIds, setDeletingRunIds] = useState<string[]>([]);
@@ -135,6 +138,7 @@ export function App() {
 		setAgentAvailable(false);
 		setAgentModels([]);
 		setSandbox(undefined);
+		setLiveHydro({ configured: false, message: "尚未配置测试实例" });
 		setConnectionMessage("正在连接平台 API……");
 		try {
 			const response = await fetch(apiUrl(origin, "/health"), { signal });
@@ -152,6 +156,14 @@ export function App() {
 			if (Array.isArray(values.agentModels)) {
 				setAgentModels(values.agentModels.filter((model): model is string => typeof model === "string"));
 			}
+			const live = values.liveHydro;
+			if (
+				typeof live === "object" &&
+				live !== null &&
+				typeof (live as Record<string, unknown>).configured === "boolean" &&
+				typeof (live as Record<string, unknown>).message === "string"
+			)
+				setLiveHydro(live as { configured: boolean; message: string });
 		} catch (error) {
 			if (signal?.aborted) return;
 			setApiStatus("offline");
@@ -356,6 +368,28 @@ export function App() {
 				// Ignore malformed progress; the run snapshot remains authoritative.
 			}
 		});
+		source.addEventListener("phase", (event) => {
+			if (!isCurrent() || !(event instanceof MessageEvent) || typeof event.data !== "string") return;
+			try {
+				const data = JSON.parse(event.data) as Record<string, unknown>;
+				if (typeof data.phase !== "string" || typeof data.message !== "string") return;
+				const phase = data.phase as AgentRun["phase"];
+				const message = data.message;
+				setAgentRun((current) =>
+					current?.id === runId
+						? {
+								...current,
+								phase,
+								phaseMessage: message,
+								phaseStartedAt: new Date().toISOString(),
+							}
+						: current,
+				);
+				setNotice(message);
+			} catch {
+				// The final run snapshot remains authoritative.
+			}
+		});
 		source.addEventListener("status", (event) => {
 			if (!isCurrent()) return;
 			if (!(event instanceof MessageEvent) || typeof event.data !== "string") return;
@@ -397,10 +431,6 @@ export function App() {
 			setNotice("服务端尚未配置可用的 Pi 模型。");
 			return;
 		}
-		if (attachments.length > 0) {
-			setNotice("当前 Skill 运行接口暂不接收二进制附件；请先用无附件题面运行，或使用确定性打包。");
-			return;
-		}
 		workspaceRevision.current += 1;
 		const revision = workspaceRevision.current;
 		eventSourceRef.current?.close();
@@ -414,6 +444,7 @@ export function App() {
 				body: JSON.stringify({
 					source: createAgentSource(draft),
 					referenceProgram: referenceProgram.code.trim() ? referenceProgram : undefined,
+					attachments: attachments.map(({ name, contentBase64 }) => ({ name, contentBase64 })),
 				}),
 			});
 			const body = (await response.json()) as unknown;
@@ -488,6 +519,28 @@ export function App() {
 		}
 	}
 
+	async function runLiveHydroVerification(): Promise<void> {
+		if (!agentRun?.artifact?.authoring || !liveHydro.configured) return;
+		const revision = workspaceRevision.current;
+		setBusyAction("live");
+		setNotice("正在导入真实 Hydro，并提交标程与错误程序……");
+		try {
+			const response = await fetch(apiUrl(apiOrigin, `/runs/${agentRun.id}/live-verify`), { method: "POST" });
+			const body = (await response.json()) as unknown;
+			if (!response.ok) throw new Error(errorMessage(body));
+			if (revision !== workspaceRevision.current) return;
+			await refreshAgentRun(agentRun.id, revision);
+			const success =
+				typeof body === "object" && body !== null && (body as Record<string, unknown>).success === true;
+			setNotice(success ? "真实 Hydro 实测通过。" : "真实 Hydro 实测完成，但存在未通过项。");
+		} catch (error) {
+			if (revision === workspaceRevision.current)
+				setNotice(error instanceof Error ? error.message : "真实 Hydro 实测失败。");
+		} finally {
+			if (revision === workspaceRevision.current) setBusyAction(undefined);
+		}
+	}
+
 	function saveApiConfiguration(): void {
 		try {
 			const normalized = normalizeApiOrigin(apiOriginDraft);
@@ -509,19 +562,19 @@ export function App() {
 		else setApiOrigin("");
 	}
 
-	async function openHistoryRun(previousRun: AgentRun): Promise<void> {
+	async function openHistoryRun(previousRun: AgentRunSummary): Promise<void> {
 		workspaceRevision.current += 1;
 		const revision = workspaceRevision.current;
 		eventSourceRef.current?.close();
 		eventSourceRef.current = undefined;
 		setBusyAction(undefined);
-		let run: AgentRun;
+		let run: AgentRun | undefined;
 		try {
-			run = (await refreshAgentRun(previousRun.id, revision)) ?? previousRun;
+			run = await refreshAgentRun(previousRun.id, revision);
 		} catch {
-			run = previousRun;
+			setRunsMessage("任务详情读取失败，请刷新后重试。");
 		}
-		if (revision !== workspaceRevision.current || deletedRunIds.current.has(previousRun.id)) return;
+		if (!run || revision !== workspaceRevision.current || deletedRunIds.current.has(previousRun.id)) return;
 		setAgentRun(run);
 		setTaskReferenceProgram(run.referenceProgram ?? { language: "cpp17", code: "" });
 		setValidation(run.artifact?.report);
@@ -531,7 +584,7 @@ export function App() {
 		watchAgentRun(run);
 	}
 
-	async function deleteRun(run: AgentRun): Promise<void> {
+	async function deleteRun(run: AgentRunSummary): Promise<void> {
 		const revision = workspaceRevision.current;
 		setDeletingRunIds((current) => [...current, run.id]);
 		setRunsMessage("");
@@ -751,193 +804,63 @@ export function App() {
 							</div>
 
 							{activeTab === "statement" && (
-								<div className="editor-grid">
-									<div className="editor-pane">
-										<div className="pane-heading">
-											<strong>Markdown 题面</strong>
-											{!draft.statement.trim() ? (
-												<button
-													className="text-button"
-													type="button"
-													onClick={() => {
-														setDraft(exampleDraft);
-														invalidateValidation();
-													}}
-												>
-													载入 A+B 示例
-												</button>
-											) : (
-												<span>样例由测试数据自动附加</span>
-											)}
-										</div>
-										<textarea
-											className="statement-editor"
-											value={draft.statement}
-											onChange={(event) => updateField("statement", event.target.value)}
-											spellCheck={false}
-											aria-label="Markdown 题面"
-											placeholder="在此粘贴完整题面。题目名称和标签可留空，由 Agent 提取。"
-										/>
-									</div>
-									<div className="preview-pane">
-										<div className="pane-heading">
-											<strong>Hydro 风格预览</strong>
-											<span>Markdown · GFM · KaTeX</span>
-										</div>
-										<article className="problem-preview">
-											<ReactMarkdown
-												remarkPlugins={[remarkGfm, remarkMath]}
-												rehypePlugins={[rehypeKatex]}
-												urlTransform={(url) => (url.startsWith("data:") ? url : defaultUrlTransform(url))}
-											>
-												{previewStatement}
-											</ReactMarkdown>
-										</article>
-									</div>
-								</div>
+								<StatementEditor
+									draft={draft}
+									previewStatement={previewStatement}
+									onStatementChange={(value) => updateField("statement", value)}
+									onLoadExample={() => {
+										setDraft(exampleDraft);
+										invalidateValidation();
+									}}
+								/>
 							)}
 
 							{activeTab === "tests" && (
-								<div className="tab-body">
-									<div className="info-strip">
-										当前测试点会组成一个 100 分逐点计分子任务。它们是已有材料，不代表已经覆盖边界或通过对拍。
-									</div>
-									<div className="test-list">
-										{draft.cases.map((testCase, index) => (
-											<div className="test-card" key={`case-${index + 1}`}>
-												<div className="test-card-heading">
-													<strong>测试点 {index + 1}</strong>
-													<span>
-														{index + 1}.in / {index + 1}.out
-													</span>
-												</div>
-												<div className="test-columns">
-													<label>
-														<span>输入</span>
-														<textarea
-															value={testCase.input}
-															onChange={(event) => updateCase(index, "input", event.target.value)}
-														/>
-													</label>
-													<label>
-														<span>标准输出</span>
-														<textarea
-															value={testCase.output}
-															onChange={(event) => updateCase(index, "output", event.target.value)}
-														/>
-													</label>
-												</div>
-												<button
-													className="text-button danger"
-													type="button"
-													onClick={() => {
-														setDraft((current) => ({
-															...current,
-															cases: current.cases.filter((_, caseIndex) => caseIndex !== index),
-														}));
-														invalidateValidation();
-													}}
-												>
-													删除测试点
-												</button>
-											</div>
-										))}
-									</div>
-									<button
-										className="button secondary"
-										type="button"
-										onClick={() => {
-											setDraft((current) => ({
-												...current,
-												cases: [...current.cases, { input: "", output: "" }],
-											}));
-											invalidateValidation();
-										}}
-									>
-										添加测试点
-									</button>
-								</div>
+								<TestDataEditor
+									cases={draft.cases}
+									onChange={updateCase}
+									onRemove={(index) => {
+										setDraft((current) => ({
+											...current,
+											cases: current.cases.filter((_, caseIndex) => caseIndex !== index),
+										}));
+										invalidateValidation();
+									}}
+									onAdd={() => {
+										setDraft((current) => ({
+											...current,
+											cases: [...current.cases, { input: "", output: "" }],
+										}));
+										invalidateValidation();
+									}}
+								/>
 							)}
 
 							{activeTab === "validation" && (
-								<div className="tab-body validation-body">
-									{agentRun && (
-										<AgentRunPanel
-											key={agentRun.id}
-											run={agentRun}
-											apiOrigin={apiOrigin}
-											className={agentClass}
-											busy={busyAction !== undefined}
-											available={agentAvailable}
-											hasReferenceProgram={!!taskReferenceProgram.code.trim()}
-											message={continuationDrafts[agentRun.id] ?? ""}
-											onMessageChange={(message) =>
-												setContinuationDrafts((current) => ({ ...current, [agentRun.id]: message }))
-											}
-											onContinue={continueAgentRun}
-											onCancel={() => void cancelAgentRun()}
-											onEditProgram={() => {
-												setEditingTaskProgram(true);
-												setActiveTab("reference");
-											}}
-										/>
-									)}
-									<div className={`validation-summary ${validationClass}`}>
-										<div className="summary-icon">
-											{validation?.valid === true ? "✓" : validation === undefined ? "…" : "!"}
-										</div>
-										<div>
-											<strong>
-												{validation?.valid === true
-													? "Hydro 格式检查通过"
-													: validation === undefined
-														? "尚未运行格式检查"
-														: "Hydro 格式检查未通过"}
-											</strong>
-											<p>该检查覆盖包结构、文件引用、限制单位、计分与比较器配置。</p>
-										</div>
-									</div>
-									{validation !== undefined && validation.issues.length > 0 && (
-										<table className="issues-table">
-											<thead>
-												<tr>
-													<th>位置</th>
-													<th>代码</th>
-													<th>说明</th>
-												</tr>
-											</thead>
-											<tbody>
-												{validation.issues.map((issue, index) => (
-													<tr key={`${issue.code}-${issue.path}-${index}`}>
-														<td>{issue.path}</td>
-														<td>
-															<code>{issue.code}</code>
-														</td>
-														<td>{issue.message}</td>
-													</tr>
-												))}
-											</tbody>
-										</table>
-									)}
-									<div className="evidence-grid">
-										<div>
-											<span>格式与目录</span>
-											<strong>{validation?.valid === true ? "通过" : "待检查"}</strong>
-										</div>
-										<div>
-											<span>标准程序校验</span>
-											<strong>
-												{agentRun?.artifact?.verification?.success
-													? `${agentRun.artifact.verification.cases.length} 个测试点通过`
-													: "未执行"}
-											</strong>
-										</div>
-										<div>
-											<span>真实 Hydro 导入</span>
-											<strong>未执行</strong>
-										</div>
-									</div>
-								</div>
+								<ValidationTab
+									run={agentRun}
+									apiOrigin={apiOrigin}
+									agentClass={agentClass}
+									busy={busyAction !== undefined}
+									agentAvailable={agentAvailable}
+									hasReferenceProgram={!!taskReferenceProgram.code.trim()}
+									continuationMessage={agentRun ? (continuationDrafts[agentRun.id] ?? "") : ""}
+									validation={validation}
+									validationClass={validationClass}
+									liveHydroConfigured={liveHydro.configured}
+									liveBusy={busyAction === "live"}
+									onContinuationMessageChange={(message) => {
+										if (agentRun)
+											setContinuationDrafts((current) => ({ ...current, [agentRun.id]: message }));
+									}}
+									onContinue={continueAgentRun}
+									onCancel={() => void cancelAgentRun()}
+									onEditProgram={() => {
+										setEditingTaskProgram(true);
+										setActiveTab("reference");
+									}}
+									onLiveVerify={() => void runLiveHydroVerification()}
+								/>
 							)}
 							{activeTab === "reference" && (
 								<ReferenceProgramEditor
@@ -973,152 +896,25 @@ export function App() {
 							)}
 						</section>
 
-						<aside className="sidebar">
-							<section className="card side-card">
-								<h2>{viewingTask ? "新题草稿信息" : "题目信息"}</h2>
-								<label className="field">
-									<span>题目名称</span>
-									<input
-										value={draft.title}
-										placeholder="留空由 Agent 提取"
-										onChange={(event) => updateField("title", event.target.value)}
-									/>
-								</label>
-								<label className="field">
-									<span>目录标识</span>
-									<input
-										value={draft.slug}
-										onChange={(event) => updateField("slug", event.target.value)}
-										spellCheck={false}
-									/>
-								</label>
-								<label className="field">
-									<span>标签</span>
-									<input value={draft.tags} onChange={(event) => updateField("tags", event.target.value)} />
-								</label>
-								<div className="field-row">
-									<label className="field">
-										<span>时间限制</span>
-										<input
-											value={draft.timeLimit}
-											onChange={(event) => updateField("timeLimit", event.target.value)}
-										/>
-									</label>
-									<label className="field">
-										<span>内存限制</span>
-										<input
-											value={draft.memoryLimit}
-											onChange={(event) => updateField("memoryLimit", event.target.value)}
-										/>
-									</label>
-								</div>
-							</section>
-
-							<section className="card side-card">
-								<div className="side-heading">
-									<h2>附件</h2>
-									<span>{attachments.length}</span>
-								</div>
-								{attachments.length === 0 && (
-									<p className="muted">上传图片后，可将 `file://文件名` 引用插入题面。</p>
-								)}
-								<ul className="attachment-list">
-									{attachments.map((attachment) => (
-										<li key={attachment.name}>
-											<span title={attachment.name}>{attachment.name}</span>
-											<div>
-												<button type="button" onClick={() => insertAttachment(attachment)}>
-													插入
-												</button>
-												<button
-													className="danger"
-													type="button"
-													onClick={() => {
-														setAttachments((current) =>
-															current.filter((item) => item.name !== attachment.name),
-														);
-														invalidateValidation();
-													}}
-												>
-													移除
-												</button>
-											</div>
-										</li>
-									))}
-								</ul>
-								<label className="upload-button">
-									上传附件
-									<input
-										type="file"
-										multiple
-										accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,application/pdf"
-										onChange={addAttachments}
-									/>
-								</label>
-							</section>
-
-							<section className="card side-card workflow-card">
-								<h2>生成流程</h2>
-								<ol className="workflow-list">
-									<li className="done">
-										<span>1</span>
-										<div>
-											<strong>整理题面</strong>
-											<small>编辑器与预览已就绪</small>
-										</div>
-									</li>
-									<li className={validationClass}>
-										<span>2</span>
-										<div>
-											<strong>格式校验</strong>
-											<small>{validation?.valid === true ? "检查通过" : "等待检查"}</small>
-										</div>
-									</li>
-									<li className={agentClass}>
-										<span>3</span>
-										<div>
-											<strong>Skill 整理与打包</strong>
-											<small>
-												{agentRun === undefined
-													? agentAvailable
-														? "等待运行"
-														: "模型未配置"
-													: agentStatusLabel(agentRun.status)}
-											</small>
-										</div>
-									</li>
-									<li className={algorithmValidation.className}>
-										<span>4</span>
-										<div>
-											<strong>算法与数据验证</strong>
-											<small>{algorithmValidation.message}</small>
-										</div>
-									</li>
-									<li>
-										<span>5</span>
-										<div>
-											<strong>Hydro 实测</strong>
-											<small>尚未配置测试实例</small>
-										</div>
-									</li>
-								</ol>
-							</section>
-
-							<section className="card side-card agent-card">
-								<div className="agent-title">
-									<span className="agent-glyph">π</span>
-									<div>
-										<strong className="agent-name">pi Skill</strong>
-										<small className="agent-id">hydro-problem-authoring</small>
-									</div>
-								</div>
-								<p>
-									{agentAvailable
-										? "模型已就绪，自动编写标程和 testlib 制题工程，必要时生成 C++ SPJ。无需预先上传程序。"
-										: "在设置页配置 AI API 后，即可从题面创建制题任务。"}
-								</p>
-							</section>
-						</aside>
+						<WorkspaceSidebar
+							draft={draft}
+							viewingTask={!!viewingTask}
+							attachments={attachments}
+							validation={validation}
+							validationClass={validationClass}
+							agentClass={agentClass}
+							agentRun={agentRun}
+							agentAvailable={agentAvailable}
+							algorithmValidation={algorithmValidation}
+							liveHydroMessage={liveHydro.message}
+							onFieldChange={updateField}
+							onInsertAttachment={insertAttachment}
+							onRemoveAttachment={(name) => {
+								setAttachments((current) => current.filter((item) => item.name !== name));
+								invalidateValidation();
+							}}
+							onUploadAttachments={(event) => void addAttachments(event)}
+						/>
 					</div>
 				</main>
 			)}

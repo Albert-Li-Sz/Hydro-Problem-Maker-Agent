@@ -45,9 +45,12 @@ export interface VerifiedAuthoringCase {
 
 export interface HydroAuthoringReport {
 	success: boolean;
+	mode: HydroAuthoringVerificationMode;
 	checks: AuthoringCheck[];
 	cases: VerifiedAuthoringCase[];
 }
+
+export type HydroAuthoringVerificationMode = "quick" | "full";
 
 export interface AuthoringSummary {
 	verificationId: string;
@@ -59,7 +62,6 @@ export interface AuthoringSummary {
 	checker: "default" | "testlib";
 	checkerProbes: number;
 	wrongPrograms: number;
-	checks: AuthoringCheck[];
 }
 
 export interface AuthoringEvidence {

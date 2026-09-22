@@ -1,3 +1,10 @@
+export type {
+	HydroLiveSubmissionResult,
+	HydroLiveVerificationRequest,
+	HydroLiveVerificationResult,
+	HydroLiveVerifier,
+} from "./live-hydro.ts";
+export { CommandHydroLiveVerifier, createHydroLiveVerifierFromEnvironment } from "./live-hydro.ts";
 export {
 	InvalidRequestError,
 	parseAgentRunRequest,
@@ -7,6 +14,7 @@ export {
 export type {
 	HydroRunArtifact,
 	HydroRunEvent,
+	HydroRunListItem,
 	HydroRunSnapshot,
 	HydroRunStatus,
 } from "./runs.ts";

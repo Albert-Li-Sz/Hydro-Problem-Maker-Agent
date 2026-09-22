@@ -1,6 +1,14 @@
 export type PageRoute = "workspace" | "runs" | "settings";
 export type ApiStatus = "checking" | "online" | "offline";
 export type AgentRunStatus = "queued" | "running" | "needs_input" | "succeeded" | "failed" | "cancelled";
+export type AgentRunPhase =
+	| "analyzing"
+	| "authoring"
+	| "quick_verification"
+	| "full_verification"
+	| "packaging"
+	| "validating"
+	| "clarification";
 
 export interface ValidationIssue {
 	severity: "error" | "warning";
@@ -14,19 +22,34 @@ export interface ValidationReport {
 	issues: ValidationIssue[];
 }
 
-export interface AgentRun {
+export interface AgentRunSummary {
 	id: string;
 	status: AgentRunStatus;
-	source: string;
+	title: string;
+	sourcePreview: string;
 	createdAt: string;
 	updatedAt: string;
 	model?: string;
+	artifact?: {
+		slug: string;
+		report: ValidationReport;
+		verification?: SandboxReport;
+		authoring?: AuthoringSummary;
+		liveVerification?: LiveHydroVerification;
+	};
+	phase?: AgentRunPhase;
+	phaseMessage?: string;
+	phaseStartedAt?: string;
+	lastEventSequence: number;
+}
+
+export interface AgentRun extends AgentRunSummary {
+	source: string;
 	assistantText: string;
 	error?: string;
-	artifact?: { slug: string; report: ValidationReport; verification?: SandboxReport; authoring?: AuthoringSummary };
 	conversation?: Array<{ role: "user" | "assistant"; content: string }>;
 	referenceProgram?: ReferenceProgram;
-	lastEventSequence?: number;
+	attachments: Array<{ name: string; contentBase64: string }>;
 }
 
 export interface AuthoringSummary {
@@ -39,7 +62,24 @@ export interface AuthoringSummary {
 	checker: "default" | "testlib";
 	checkerProbes: number;
 	wrongPrograms: number;
+}
+
+export interface AuthoringReport {
+	success: boolean;
+	mode: "quick" | "full";
 	checks: Array<{ stage: string; caseId?: string; passed: boolean; message: string }>;
+	cases: Array<{ id: string; durationMs: number; timeLimitMs: number; memoryLimitMb: number }>;
+}
+
+export interface LiveHydroVerification {
+	success: boolean;
+	startedAt: string;
+	finishedAt: string;
+	problemUrl?: string;
+	import: { success: boolean; message: string };
+	reference: { name: string; verdict: string; score?: number; accepted: boolean };
+	wrongPrograms: Array<{ name: string; verdict: string; score?: number; accepted: boolean }>;
+	message: string;
 }
 
 export interface ReferenceProgram {
@@ -144,18 +184,39 @@ export function readAgentRun(value: unknown): AgentRun | undefined {
 		typeof record.source !== "string" ||
 		typeof record.createdAt !== "string" ||
 		typeof record.updatedAt !== "string" ||
-		typeof record.assistantText !== "string"
+		typeof record.assistantText !== "string" ||
+		typeof record.title !== "string" ||
+		typeof record.sourcePreview !== "string" ||
+		typeof record.lastEventSequence !== "number" ||
+		!Array.isArray(record.attachments)
 	) {
 		return undefined;
 	}
 	return value as AgentRun;
 }
 
-export function readAgentRunList(value: unknown): AgentRun[] {
+export function readAgentRunSummary(value: unknown): AgentRunSummary | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const record = value as Record<string, unknown>;
+	if (
+		typeof record.id !== "string" ||
+		typeof record.status !== "string" ||
+		!agentRunStatuses.includes(record.status as AgentRunStatus) ||
+		typeof record.title !== "string" ||
+		typeof record.sourcePreview !== "string" ||
+		typeof record.createdAt !== "string" ||
+		typeof record.updatedAt !== "string" ||
+		typeof record.lastEventSequence !== "number"
+	)
+		return undefined;
+	return value as AgentRunSummary;
+}
+
+export function readAgentRunList(value: unknown): AgentRunSummary[] {
 	if (typeof value !== "object" || value === null) return [];
 	const runs = (value as Record<string, unknown>).runs;
 	if (!Array.isArray(runs)) return [];
-	return runs.flatMap((run) => readAgentRun(run) ?? []);
+	return runs.flatMap((run) => readAgentRunSummary(run) ?? []);
 }
 
 function readOptionalText(record: Record<string, unknown>, key: string): string | undefined | false {
@@ -206,7 +267,8 @@ export function readAiConfiguration(value: unknown): AiConfiguration | undefined
 	};
 }
 
-export function runDisplayTitle(run: AgentRun): string {
+export function runDisplayTitle(run: AgentRun | AgentRunSummary): string {
+	if (!("source" in run)) return run.title || run.artifact?.slug || `任务 ${run.id.slice(0, 8)}`;
 	const statementTitle = run.source
 		.split("## 用户提供的题面")[1]
 		?.match(/^#\s+(.+)$/mu)?.[1]
@@ -220,7 +282,7 @@ export function runDisplayTitle(run: AgentRun): string {
 }
 
 export function algorithmValidationPresentation(
-	run: AgentRun | undefined,
+	run: AgentRun | AgentRunSummary | undefined,
 	sandbox: SandboxStatus | undefined,
 ): WorkflowStepPresentation {
 	const authoring = run?.artifact?.authoring;

@@ -761,6 +761,32 @@ button:disabled {
 	color: #8c969e;
 	font-size: 9px;
 }
+.agent-phase {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 12px;
+	padding: 9px 11px;
+	border: 1px solid #d9e6f0;
+	background: #f5f9fc;
+	color: #4b6478;
+	font-size: 12px;
+}
+.agent-phase .notice-dot {
+	flex: 0 0 auto;
+}
+.agent-phase time {
+	margin-left: auto;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	color: #82909b;
+}
+.report-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 12px;
+	color: #7d8993;
+}
 .agent-run-panel pre {
 	max-height: 260px;
 	margin: 13px 0 0;

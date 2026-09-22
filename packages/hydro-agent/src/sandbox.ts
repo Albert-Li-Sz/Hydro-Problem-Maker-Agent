@@ -4,6 +4,7 @@ import { compareHydroDefaultOutput } from "@hydro-problem-make/authoring";
 import {
 	type HydroAuthoringProject,
 	type HydroAuthoringReport,
+	type HydroAuthoringVerificationMode,
 	validateAuthoringProject,
 } from "./authoring-project.ts";
 import { authoringRunner } from "./authoring-runner.ts";
@@ -52,7 +53,10 @@ export interface HydroSandboxStatus {
 export interface HydroSandbox {
 	status(): Promise<HydroSandboxStatus>;
 	run(request: HydroSandboxRequest, signal?: AbortSignal): Promise<HydroSandboxReport>;
-	verifyProject?(project: HydroAuthoringProject, signal?: AbortSignal): Promise<HydroAuthoringReport>;
+	verifyProject?(
+		project: HydroAuthoringProject,
+		options?: { mode?: HydroAuthoringVerificationMode; signal?: AbortSignal },
+	): Promise<HydroAuthoringReport>;
 }
 
 function docker(args: string[], input = "", timeoutMs = 10_000, signal?: AbortSignal): Promise<string> {
@@ -162,9 +166,19 @@ export class DockerHydroSandbox implements HydroSandbox {
 		};
 	}
 
-	async verifyProject(project: HydroAuthoringProject, signal?: AbortSignal): Promise<HydroAuthoringReport> {
+	async verifyProject(
+		project: HydroAuthoringProject,
+		options: { mode?: HydroAuthoringVerificationMode; signal?: AbortSignal } = {},
+	): Promise<HydroAuthoringReport> {
 		validateAuthoringProject(project);
-		return JSON.parse(await this.execute(authoringRunner, project, 900_000, signal)) as HydroAuthoringReport;
+		return JSON.parse(
+			await this.execute(
+				authoringRunner,
+				{ ...project, verificationMode: options.mode ?? "full" },
+				900_000,
+				options.signal,
+			),
+		) as HydroAuthoringReport;
 	}
 
 	private async execute(runner: string, payload: unknown, timeoutMs: number, signal?: AbortSignal): Promise<string> {

@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { HydroProblemSpec } from "@hydro-problem-make/authoring";
 import { Type } from "typebox";
-import type { AuthoringSummary } from "./authoring-project.ts";
-import { authoringProjectSchema, programSchema } from "./authoring-schema.ts";
+import { decodeAgentAttachments, type HydroAgentAttachment } from "./attachments.ts";
+import { loadCompleteAuthoringProject, updateAuthoringDraft } from "./authoring-draft.ts";
+import type { AuthoringSummary, HydroAuthoringReport, HydroAuthoringVerificationMode } from "./authoring-project.ts";
+import { authoringProjectPatchSchema, programSchema } from "./authoring-schema.ts";
+import { cacheKey, readRunCache, writeRunCache } from "./run-cache.ts";
 import type { HydroReferenceProgram, HydroSandbox } from "./sandbox.ts";
 import { verifyReferenceProgram } from "./verification.ts";
 import {
@@ -63,9 +66,14 @@ const problemSchema = Type.Object({
 export function createHydroAuthoringTools(
 	workspaceRoot: string,
 	runId: string,
-	options: { sandbox?: HydroSandbox; referenceProgram?: HydroReferenceProgram } = {},
+	options: {
+		sandbox?: HydroSandbox;
+		referenceProgram?: HydroReferenceProgram;
+		attachments?: HydroAgentAttachment[];
+	} = {},
 ): ToolDefinition[] {
 	let referenceProgram = options.referenceProgram;
+	const uploadedAttachments = decodeAgentAttachments(options.attachments ?? []);
 	const buildTool = defineTool({
 		name: "build_hydro_problem",
 		label: "Build Hydro problem",
@@ -96,8 +104,16 @@ export function createHydroAuthoringTools(
 			if (evidence && (!evidence.report.success || !evidence.summary.success))
 				throw new Error("制题验证尚未通过，请修复失败项后重新验证。");
 			const usedIds = new Set<string>();
+			const attachmentNames = new Set<string>();
+			const attachments: Array<NonNullable<HydroProblemSpec["attachments"]>[number]> = [];
+			for (const attachment of [...(params.problem.attachments ?? []), ...uploadedAttachments]) {
+				if (attachmentNames.has(attachment.name)) throw new Error(`附件名称重复：${attachment.name}`);
+				attachmentNames.add(attachment.name);
+				attachments.push(attachment);
+			}
 			const problem: HydroProblemSpec = {
 				...params.problem,
+				attachments: attachments.length ? attachments : undefined,
 				checker: evidence?.project.checker ? { type: "testlib", source: evidence.project.checker } : undefined,
 				subtasks: params.problem.subtasks.map((subtask) => ({
 					...subtask,
@@ -192,50 +208,100 @@ export function createHydroAuthoringTools(
 		return report;
 	}
 
-	if (!options.sandbox) return [buildTool, validateTool];
+	const clarificationTool = defineTool({
+		name: "request_hydro_clarification",
+		label: "请求补充题意",
+		description:
+			"Only use when the current statement truly lacks information required to determine valid input or accepted output. Never use it for missing programs, generators, validators, tests or metadata that you can author yourself.",
+		promptSnippet: "Request one structured clarification only for irreducibly missing problem semantics",
+		parameters: Type.Object({
+			question: Type.String({ minLength: 1, maxLength: 1000 }),
+			missingFields: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), {
+				minItems: 1,
+				maxItems: 10,
+			}),
+		}),
+		executionMode: "sequential",
+		async execute(_id, params) {
+			return {
+				content: [{ type: "text", text: params.question }],
+				details: { clarificationRequested: true, ...params },
+			};
+		},
+	});
+
+	if (!options.sandbox) return [buildTool, validateTool, clarificationTool];
 	const sandbox = options.sandbox;
+	const updateTool = defineTool({
+		name: "update_hydro_authoring",
+		label: "更新制题工程",
+		description:
+			"Create or patch the persistent authoring draft. Submit logical sections in several small calls. Arrays replace their previous value; checker/checkerProbes accept null to remove them. Subsequent verification reads the saved draft.",
+		promptSnippet: "Stage or repair one part of the persistent Hydro authoring project",
+		parameters: Type.Object({ patch: authoringProjectPatchSchema }),
+		executionMode: "sequential",
+		async execute(_id, params) {
+			const result = await updateAuthoringDraft(workspaceRoot, runId, params.patch);
+			return {
+				content: [{ type: "text", text: JSON.stringify(result) }],
+				details: result,
+			};
+		},
+	});
 	const verifyTool = defineTool({
 		name: "verify_hydro_authoring",
 		label: "testlib 制题验证",
 		description:
-			"Compile and run a complete authoring project: C++ testlib generator + strict validator, reference + independent oracle, known-wrong programs, optional C++ testlib SPJ and probes. Materialize all data locally. Returns a verificationId and case IDs; build with those IDs, never transcribe generated files. Fix failures and resubmit a complete project. Uploaded code does not constrain program selection.",
-		promptSnippet: "Generate and verify complete testlib data and programs in the Linux sandbox before packaging",
-		parameters: Type.Object({ project: authoringProjectSchema }),
+			"Verify the persistent draft created by update_hydro_authoring. Use quick mode while repairing, then full mode exactly once before packaging. Full success returns a verificationId and verified case IDs.",
+		promptSnippet: "Quick-check the staged project, then run the full Linux sandbox verification",
+		parameters: Type.Object({
+			mode: Type.Optional(Type.Union([Type.Literal("quick"), Type.Literal("full")])),
+		}),
 		executionMode: "sequential",
 		async execute(_id, params, signal) {
 			if (!sandbox.verifyProject) throw new Error("当前沙箱未启用 testlib 制题，请更新沙箱镜像。");
-			const report = await sandbox.verifyProject(params.project, signal);
+			const { revision, project } = await loadCompleteAuthoringProject(workspaceRoot, runId);
+			const mode: HydroAuthoringVerificationMode = params.mode ?? "quick";
+			const key = cacheKey({ mode, project });
+			let report = await readRunCache<HydroAuthoringReport>(workspaceRoot, runId, "authoring", key);
+			const cacheHit = report !== undefined;
+			if (!report) {
+				report = await sandbox.verifyProject(project, { mode, signal });
+				await writeRunCache(workspaceRoot, runId, "authoring", key, report);
+			}
+			const verificationId = mode === "full" && report.success ? randomUUID() : undefined;
 			const summary: AuthoringSummary = {
-				verificationId: randomUUID(),
+				verificationId: verificationId ?? "",
 				success: report.success,
 				testCases: report.cases.length,
 				generatedCases: report.checks.filter((item) => item.stage === "generator" && item.passed).length,
 				oracleCases: report.checks.filter((item) => item.stage === "oracle" && item.passed).length,
 				validatorNegativeCases: report.checks.filter((item) => item.stage === "validator-negative" && item.passed)
 					.length,
-				checker: params.project.checker ? "testlib" : "default",
+				checker: project.checker ? "testlib" : "default",
 				checkerProbes: report.checks.filter((item) => item.stage === "checker-probe" && item.passed).length,
 				wrongPrograms: report.checks.filter((item) => item.stage === "wrong-program-killed" && item.passed).length,
-				checks: report.checks,
 			};
-			await saveAuthoringEvidence(workspaceRoot, runId, { project: params.project, report, summary });
+			if (verificationId) await saveAuthoringEvidence(workspaceRoot, runId, { project, report, summary });
+			const failures = report.checks.filter((item) => !item.passed);
+			const result = {
+				...summary,
+				verificationId,
+				mode,
+				revision,
+				cacheHit,
+				checks: failures.slice(0, 30),
+				omittedFailures: Math.max(0, failures.length - 30),
+				cases: report.cases.map(({ id, input, output, durationMs }) => ({
+					id,
+					inputBytes: Buffer.byteLength(input),
+					outputBytes: Buffer.byteLength(output),
+					durationMs,
+				})),
+			};
 			return {
-				content: [
-					{
-						type: "text",
-						text: JSON.stringify({
-							...summary,
-							checks: report.checks.filter((item) => !item.passed),
-							cases: report.cases.map(({ id, input, output, durationMs }) => ({
-								id,
-								inputBytes: Buffer.byteLength(input),
-								outputBytes: Buffer.byteLength(output),
-								durationMs,
-							})),
-						}),
-					},
-				],
-				details: summary,
+				content: [{ type: "text", text: JSON.stringify(result) }],
+				details: result,
 			};
 		},
 	});
@@ -259,13 +325,26 @@ export function createHydroAuthoringTools(
 		async execute(_id, params, signal) {
 			const program = params.program ?? referenceProgram;
 			if (!program) throw new Error("请根据题面编写程序并通过 program 参数提交。");
-			const report = await sandbox.run({ ...params, program }, signal);
+			const request = { ...params, program };
+			const key = cacheKey(request);
+			let report = await readRunCache<Awaited<ReturnType<HydroSandbox["run"]>>>(
+				workspaceRoot,
+				runId,
+				"program",
+				key,
+			);
+			const cacheHit = report !== undefined;
+			if (!report) {
+				report = await sandbox.run(request, signal);
+				await writeRunCache(workspaceRoot, runId, "program", key, report);
+			}
 			if (params.role !== "candidate" && report.success) {
 				referenceProgram = program;
 				await saveReferenceEvidence(workspaceRoot, runId, program, report);
 			}
-			return { content: [{ type: "text", text: JSON.stringify(report) }], details: report };
+			const details = { ...report, cacheHit };
+			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
 	});
-	return [runTool, verifyTool, buildTool, validateTool];
+	return [runTool, updateTool, verifyTool, buildTool, validateTool, clarificationTool];
 }

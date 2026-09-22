@@ -4,6 +4,13 @@ import { appleProject, divisorProject } from "./authoring-fixtures.ts";
 
 describe.runIf(process.env.HYDRO_TEST_SANDBOX === "1")("testlib authoring pipeline", () => {
 	const sandbox = new DockerHydroSandbox();
+	it("limits quick verification to a representative subset", async () => {
+		const report = await sandbox.verifyProject(appleProject, { mode: "quick" });
+		expect(report.mode).toBe("quick");
+		expect(report.success, JSON.stringify(report.checks.filter((item) => !item.passed))).toBe(true);
+		expect(report.cases.length).toBeLessThanOrEqual(8);
+		expect(report.checks.some((item) => item.stage === "wrong-program-survived")).toBe(false);
+	}, 90_000);
 	it("generates apples data, validates it, checks an independent oracle and kills the stale 三连击 program", async () => {
 		const report = await sandbox.verifyProject(appleProject);
 		expect(report.success, JSON.stringify(report.checks.filter((item) => !item.passed))).toBe(true);

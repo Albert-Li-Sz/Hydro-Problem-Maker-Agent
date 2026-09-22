@@ -76,3 +76,21 @@ export const authoringProjectSchema = Type.Object({
 			"Algorithm proof, oracle independence, input constraints, generator modes/seed plan, boundary/stress coverage and checker semantics",
 	}),
 });
+
+export const authoringProjectPatchSchema = Type.Object(
+	{
+		reference: Type.Optional(programSchema),
+		oracle: Type.Optional(programSchema),
+		generator: Type.Optional(cppSource),
+		validator: Type.Optional(cppSource),
+		checker: Type.Optional(Type.Union([cppSource, Type.Null()])),
+		cases: Type.Optional(authoringProjectSchema.properties.cases),
+		invalidInputs: Type.Optional(authoringProjectSchema.properties.invalidInputs),
+		checkerProbes: Type.Optional(Type.Union([authoringProjectSchema.properties.checkerProbes, Type.Null()])),
+		wrongPrograms: Type.Optional(authoringProjectSchema.properties.wrongPrograms),
+		timeLimitMs: Type.Optional(authoringProjectSchema.properties.timeLimitMs),
+		memoryLimitMb: Type.Optional(authoringProjectSchema.properties.memoryLimitMb),
+		analysis: Type.Optional(authoringProjectSchema.properties.analysis),
+	},
+	{ minProperties: 1 },
+);

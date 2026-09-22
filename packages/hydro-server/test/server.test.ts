@@ -18,6 +18,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildProblemArtifact, saveAuthoringEvidence } from "../../hydro-agent/src/workspace.ts";
 import { noInputProject } from "../../hydro-agent/test/authoring-fixtures.ts";
+import type { HydroLiveVerifier } from "../src/live-hydro.ts";
 import { HydroRunManager } from "../src/runs.ts";
 import { createHydroServer } from "../src/server.ts";
 
@@ -31,8 +32,9 @@ async function startServer(
 	runManager?: HydroRunManager,
 	aiConfiguration?: HydroAiConfigurationController,
 	sandbox?: HydroSandbox,
+	liveVerifier?: HydroLiveVerifier,
 ): Promise<string> {
-	const server = createHydroServer({ runManager, aiConfiguration, sandbox });
+	const server = createHydroServer({ runManager, aiConfiguration, sandbox, liveVerifier });
 	servers.push(server);
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
@@ -83,6 +85,70 @@ const artifactSpec = {
 } satisfies HydroProblemSpec;
 
 describe("Hydro HTTP API", () => {
+	it("runs an optional live Hydro import and judging adapter and stores its evidence", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "hydro-live-api-"));
+		try {
+			const manager = new HydroRunManager(
+				{
+					readiness: { available: true, models: ["fake/model"] },
+					async execute(input) {
+						const summary: AuthoringSummary = {
+							verificationId: "verified",
+							success: true,
+							testCases: 1,
+							generatedCases: 1,
+							oracleCases: 1,
+							validatorNegativeCases: 1,
+							checker: "default",
+							checkerProbes: 0,
+							wrongPrograms: 1,
+						};
+						await saveAuthoringEvidence(workspace, input.runId, {
+							project: noInputProject,
+							summary,
+							report: { success: true, mode: "full", checks: [], cases: [] },
+						});
+						const artifact = await buildProblemArtifact(workspace, input.runId, artifactSpec);
+						return {
+							status: "succeeded",
+							model: "fake/model",
+							assistantText: "done",
+							artifact: { ...artifact, slug: artifactSpec.slug, authoring: summary },
+						};
+					},
+				},
+				join(workspace, "runs.json"),
+			);
+			const verifier: HydroLiveVerifier = {
+				status: () => ({ configured: true, message: "fake Hydro" }),
+				async verify(request) {
+					expect(request.authoringProject.wrongPrograms).toHaveLength(1);
+					return {
+						success: true,
+						startedAt: "2026-01-01T00:00:00.000Z",
+						finishedAt: "2026-01-01T00:00:01.000Z",
+						import: { success: true, message: "imported" },
+						reference: { name: "reference", verdict: "AC", score: 100, accepted: true },
+						wrongPrograms: [{ name: "prints 41", verdict: "WA", score: 0, accepted: false }],
+						message: "passed",
+					};
+				},
+			};
+			const origin = await startServer(manager, undefined, undefined, verifier);
+			const run = manager.create("输出 42。");
+			await vi.waitFor(() => expect(manager.get(run.id)?.status).toBe("succeeded"));
+			const report = await fetch(`${origin}/api/runs/${run.id}/authoring-report`);
+			expect(report.status).toBe(200);
+			expect(await report.json()).toMatchObject({ success: true, mode: "full" });
+			const response = await fetch(`${origin}/api/runs/${run.id}/live-verify`, { method: "POST" });
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ success: true, reference: { verdict: "AC", score: 100 } });
+			expect(manager.get(run.id)?.artifact?.liveVerification?.success).toBe(true);
+		} finally {
+			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
 	it("downloads private authoring sources and provenance for the selected completed run", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "hydro-authoring-api-"));
 		try {
@@ -99,13 +165,13 @@ describe("Hydro HTTP API", () => {
 						checker: "default",
 						checkerProbes: 0,
 						wrongPrograms: 1,
-						checks: [],
 					};
 					await saveAuthoringEvidence(workspace, input.runId, {
 						project: noInputProject,
 						summary,
 						report: {
 							success: true,
+							mode: "full",
 							checks: [],
 							cases: [
 								{
@@ -451,6 +517,37 @@ describe("Hydro HTTP API", () => {
 		const events = await fetch(`${origin}/api/runs/${created.id}/events`);
 		expect(events.headers.get("content-type")).toContain("text/event-stream");
 		expect(await events.text()).toContain('"status":"needs_input"');
+	});
+
+	it("accepts binary attachments for Agent workflows", async () => {
+		let received: Parameters<HydroAgentExecutor["execute"]>[0]["attachments"];
+		const manager = new HydroRunManager({
+			readiness: { available: true, models: ["fake/model"] },
+			async execute(input) {
+				received = input.attachments;
+				return { status: "failed", model: "fake/model", assistantText: "stopped" };
+			},
+		});
+		const origin = await startServer(manager);
+		const response = await fetch(`${origin}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				source: "# Attachment",
+				attachments: [{ name: "diagram.png", contentBase64: "aGVsbG8=" }],
+			}),
+		});
+		expect(response.status).toBe(202);
+		await vi.waitFor(() => expect(received).toEqual([{ name: "diagram.png", contentBase64: "aGVsbG8=" }]));
+		const invalid = await fetch(`${origin}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				source: "# Bad attachment",
+				attachments: [{ name: "../diagram.png", contentBase64: "aGVsbG8=" }],
+			}),
+		});
+		expect(invalid.status).toBe(400);
 	});
 
 	it("downloads a revalidated archive produced by an Agent run without exposing its server path", async () => {

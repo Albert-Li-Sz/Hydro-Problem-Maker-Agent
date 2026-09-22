@@ -4,10 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HydroProblemSpec } from "@hydro-problem-make/authoring";
 import { describe, expect, it } from "vitest";
+import { loadCompleteAuthoringProject, updateAuthoringDraft } from "../src/authoring-draft.ts";
 import { buildHydroAuthoringPrompt } from "../src/executor.ts";
+import { cacheKey, readRunCache, writeRunCache } from "../src/run-cache.ts";
 import { loadHydroAuthoringResources } from "../src/session.ts";
 import { createHydroAuthoringTools } from "../src/tools.ts";
 import { buildProblemArtifact, problemArtifactDirectory, validateProblemArtifact } from "../src/workspace.ts";
+import { noInputProject } from "./authoring-fixtures.ts";
 
 const problem = {
 	slug: "sum",
@@ -40,6 +43,38 @@ describe("Hydro Agent workspace", () => {
 		for (const tool of tools) {
 			const schema = tool.parameters as unknown as { properties?: Record<string, unknown> };
 			expect(schema.properties).not.toHaveProperty("runId");
+		}
+	});
+
+	it("stages small authoring patches and reuses deterministic cache entries", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "hydro-draft-"));
+		try {
+			const first = await updateAuthoringDraft(workspace, "run-1", {
+				reference: noInputProject.reference,
+				oracle: noInputProject.oracle,
+			});
+			expect(first).toMatchObject({ revision: 1, complete: false });
+			expect(first.missingFields).toContain("generator");
+			const second = await updateAuthoringDraft(workspace, "run-1", {
+				generator: noInputProject.generator,
+				validator: noInputProject.validator,
+				cases: noInputProject.cases,
+				invalidInputs: noInputProject.invalidInputs,
+				wrongPrograms: noInputProject.wrongPrograms,
+				timeLimitMs: noInputProject.timeLimitMs,
+				memoryLimitMb: noInputProject.memoryLimitMb,
+				analysis: noInputProject.analysis,
+			});
+			expect(second).toEqual({ revision: 2, complete: true, missingFields: [] });
+			await expect(loadCompleteAuthoringProject(workspace, "run-1")).resolves.toMatchObject({
+				revision: 2,
+				project: noInputProject,
+			});
+			const key = cacheKey({ mode: "quick", project: noInputProject });
+			await writeRunCache(workspace, "run-1", "authoring", key, { success: true });
+			await expect(readRunCache(workspace, "run-1", "authoring", key)).resolves.toEqual({ success: true });
+		} finally {
+			await rm(workspace, { recursive: true, force: true });
 		}
 	});
 

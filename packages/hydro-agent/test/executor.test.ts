@@ -50,7 +50,16 @@ describe("Pi authoring executor", () => {
 	it("restores its Pi transcript when a user answers a clarification", async () => {
 		const f = await fixture();
 		try {
-			f.faux.setResponses([fauxAssistantMessage("请确认题面。")]);
+			f.faux.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("request_hydro_clarification", {
+						question: "请确认题面。",
+						missingFields: ["完整题意"],
+					}),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("请确认题面。"),
+			]);
 			const input = {
 				runId: "continued",
 				source: "# 三连击",
@@ -86,6 +95,23 @@ describe("Pi authoring executor", () => {
 		}
 	});
 
+	it("does not classify an unstructured model question as missing user input", async () => {
+		const f = await fixture();
+		try {
+			f.faux.setResponses([fauxAssistantMessage("请上传标准程序。")]);
+			const result = await f.executor.execute({
+				runId: "plain-question",
+				source: "# A+B\n输入两个整数，输出和。",
+				signal: new AbortController().signal,
+				onEvent: () => {},
+			});
+			expect(result.status).toBe("failed");
+			expect(result.assistantText).toContain("未通过结构化工具指出缺失语义");
+		} finally {
+			await f.cleanup();
+		}
+	});
+
 	it("reports provider errors as failed rather than asking for problem information", async () => {
 		const f = await fixture();
 		try {
@@ -111,8 +137,15 @@ describe("Pi authoring executor", () => {
 				fauxAssistantMessage(fauxThinking("xxxx"), { stopReason: "length" }),
 				(context) => {
 					recoveryPrompt = JSON.stringify(context.messages.filter((message) => message.role === "user"));
-					return fauxAssistantMessage("请补充缺失的输入范围。");
+					return fauxAssistantMessage(
+						fauxToolCall("request_hydro_clarification", {
+							question: "请补充缺失的输入范围。",
+							missingFields: ["输入范围"],
+						}),
+						{ stopReason: "toolUse" },
+					);
 				},
+				fauxAssistantMessage("请补充缺失的输入范围。"),
 			]);
 			const result = await f.executor.execute({
 				runId: "length-recovery",
@@ -120,8 +153,8 @@ describe("Pi authoring executor", () => {
 				signal: new AbortController().signal,
 				onEvent: () => {},
 			});
-			expect(f.faux.state.callCount).toBe(2);
-			expect(recoveryPrompt).toContain("立即调用 verify_hydro_authoring");
+			expect(f.faux.state.callCount).toBe(3);
+			expect(recoveryPrompt).toContain("update_hydro_authoring");
 			expect(result).toMatchObject({
 				status: "needs_input",
 				assistantText: "请补充缺失的输入范围。",
@@ -198,7 +231,13 @@ describe("Pi authoring executor", () => {
 						}),
 						{ stopReason: "toolUse" },
 					),
-					fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { project: noInputProject }), {
+					fauxAssistantMessage(
+						fauxToolCall("update_hydro_authoring", {
+							patch: JSON.parse(JSON.stringify(noInputProject)) as JsonValue,
+						}),
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { mode: "full" }), {
 						stopReason: "toolUse",
 					}),
 					(context) => {
@@ -279,13 +318,16 @@ describe("Pi authoring executor", () => {
 				};
 				f.faux.setResponses([
 					fauxAssistantMessage(
-						fauxToolCall("verify_hydro_authoring", {
-							project: JSON.parse(JSON.stringify(divisorProject)) as JsonValue,
+						fauxToolCall("update_hydro_authoring", {
+							patch: JSON.parse(JSON.stringify(divisorProject)) as JsonValue,
 						}),
 						{
 							stopReason: "toolUse",
 						},
 					),
+					fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { mode: "full" }), {
+						stopReason: "toolUse",
+					}),
 					(context) => {
 						const result = [...context.messages]
 							.reverse()
@@ -357,18 +399,28 @@ describe("Pi authoring executor", () => {
 				let repairPrompt = "";
 				f.faux.setResponses([
 					fauxAssistantMessage(
-						fauxToolCall("verify_hydro_authoring", {
-							project: { ...noInputProject, reference: { language: "python3", code: "print(41)" } },
+						fauxToolCall("update_hydro_authoring", {
+							patch: {
+								...noInputProject,
+								reference: { language: "python3", code: "print(41)" },
+							},
 						}),
 						{ stopReason: "toolUse" },
 					),
+					fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { mode: "full" }), {
+						stopReason: "toolUse",
+					}),
 					fauxAssistantMessage("标程输出有误。"),
 					(context) => {
 						repairPrompt = JSON.stringify(context.messages.filter((item) => item.role === "user"));
-						return fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { project: noInputProject }), {
-							stopReason: "toolUse",
-						});
+						return fauxAssistantMessage(
+							fauxToolCall("update_hydro_authoring", { patch: { reference: noInputProject.reference } }),
+							{ stopReason: "toolUse" },
+						);
 					},
+					fauxAssistantMessage(fauxToolCall("verify_hydro_authoring", { mode: "full" }), {
+						stopReason: "toolUse",
+					}),
 					(context) => {
 						const result = [...context.messages]
 							.reverse()
@@ -413,7 +465,7 @@ describe("Pi authoring executor", () => {
 					onEvent: () => {},
 				});
 				expect(result.status, JSON.stringify(result)).toBe("succeeded");
-				expect(repairPrompt).toContain("自行修复失败的源码");
+				expect(repairPrompt).toContain("修复失败部分");
 			} finally {
 				await f.cleanup();
 			}

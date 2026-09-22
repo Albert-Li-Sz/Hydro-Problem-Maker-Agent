@@ -1,5 +1,15 @@
-import type { HydroAiConfigurationInput, HydroReferenceProgram, HydroSandboxRequest } from "@hydro-problem-make/agent";
-import type { HydroProblemSpec, HydroSubtask, HydroTestCase } from "@hydro-problem-make/authoring";
+import type {
+	HydroAgentAttachment,
+	HydroAiConfigurationInput,
+	HydroReferenceProgram,
+	HydroSandboxRequest,
+} from "@hydro-problem-make/agent";
+import {
+	type HydroProblemSpec,
+	type HydroSubtask,
+	type HydroTestCase,
+	isSafeFlatName,
+} from "@hydro-problem-make/authoring";
 
 export class InvalidRequestError extends Error {
 	constructor(message: string) {
@@ -136,17 +146,48 @@ function readReferenceProgram(value: unknown): HydroReferenceProgram | undefined
 	return { language, code };
 }
 
-export function parseAgentRunRequest(value: unknown): { source: string; referenceProgram?: HydroReferenceProgram } {
+function readAgentAttachments(value: unknown): HydroAgentAttachment[] | undefined {
+	if (value === undefined) return undefined;
+	const names = new Set<string>();
+	let totalBytes = 0;
+	const attachments = readArray(value, "request.attachments").map((value, index) => {
+		const path = `request.attachments[${index}]`;
+		const record = readRecord(value, path);
+		const name = readString(record, "name", path);
+		if (!isSafeFlatName(name) || names.has(name))
+			throw new InvalidRequestError(`${path}.name must be a unique flat ASCII filename.`);
+		names.add(name);
+		const contentBase64 = readString(record, "contentBase64", path);
+		const content = decodeBase64(contentBase64, `${path}.contentBase64`);
+		if (content.byteLength > 1024 * 1024) throw new InvalidRequestError(`${path} exceeds 1 MiB.`);
+		totalBytes += content.byteLength;
+		return { name, contentBase64 };
+	});
+	if (attachments.length > 20 || totalBytes > 10 * 1024 * 1024)
+		throw new InvalidRequestError("Agent attachments exceed 20 files or 10 MiB.");
+	return attachments;
+}
+
+export function parseAgentRunRequest(value: unknown): {
+	source: string;
+	referenceProgram?: HydroReferenceProgram;
+	attachments?: HydroAgentAttachment[];
+} {
 	const root = readRecord(value, "request");
 	const source = readString(root, "source", "request").trim();
 	if (source.length === 0) throw new InvalidRequestError("request.source cannot be empty.");
 	if (source.length > 200_000) throw new InvalidRequestError("request.source exceeds 200000 characters.");
-	return { source, referenceProgram: readReferenceProgram(root.referenceProgram) };
+	return {
+		source,
+		referenceProgram: readReferenceProgram(root.referenceProgram),
+		attachments: readAgentAttachments(root.attachments),
+	};
 }
 
 export function parseContinueRequest(value: unknown): {
 	message: string;
 	referenceProgram?: HydroReferenceProgram | null;
+	attachments?: HydroAgentAttachment[] | null;
 } {
 	const root = readRecord(value, "request");
 	const message = readString(root, "message", "request").trim();
@@ -154,6 +195,7 @@ export function parseContinueRequest(value: unknown): {
 	return {
 		message,
 		referenceProgram: root.referenceProgram === null ? null : readReferenceProgram(root.referenceProgram),
+		attachments: root.attachments === null ? null : readAgentAttachments(root.attachments),
 	};
 }
 

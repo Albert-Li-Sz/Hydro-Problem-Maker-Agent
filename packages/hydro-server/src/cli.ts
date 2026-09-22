@@ -6,6 +6,7 @@ import {
 	HydroAiConfiguration,
 	type HydroAiConfigurationController,
 } from "@hydro-problem-make/agent";
+import { createHydroLiveVerifierFromEnvironment } from "./live-hydro.ts";
 import { HydroRunManager } from "./runs.ts";
 import { createHydroServer } from "./server.ts";
 
@@ -19,6 +20,7 @@ if (!Number.isSafeInteger(maxConcurrentRuns) || maxConcurrentRuns < 1 || maxConc
 const projectRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const workspaceRoot = resolve(projectRoot, process.env.HYDRO_WORKSPACE_ROOT ?? ".hydro-problem-make");
 const sandbox = new DockerHydroSandbox(process.env.HYDRO_SANDBOX_IMAGE);
+const liveVerifier = createHydroLiveVerifierFromEnvironment();
 let aiConfiguration: (HydroAiConfigurationController & HydroAgentExecutor) | undefined;
 let runManager: HydroRunManager | undefined;
 try {
@@ -42,9 +44,11 @@ const server = createHydroServer({
 	runManager,
 	aiConfiguration,
 	sandbox,
+	liveVerifier,
 });
 server.listen(portValue, "127.0.0.1", () => {
 	console.log(`Hydro Problem Make API listening on http://127.0.0.1:${portValue}`);
 	console.log(`Agent generation: ${runManager?.getReadiness().available === true ? "enabled" : "disabled"}`);
 	console.log(`Concurrent workflows: ${runManager?.getMaxConcurrentRuns() ?? 0}`);
+	console.log(`Live Hydro verification: ${liveVerifier?.status().message ?? "not configured"}`);
 });

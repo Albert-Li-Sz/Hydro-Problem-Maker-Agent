@@ -4,9 +4,9 @@ This private package embeds Pi with the project-owned Hydro authoring Skill and 
 
 Artifacts are addressed by safe run IDs and problem slugs, then stored below `artifacts/<run-id>/hydro/` in the assigned workspace.
 
-Authoring sessions expose `run_reference_program` for exploration, `verify_hydro_authoring` for complete testlib authoring, `build_hydro_problem`, and `validate_hydro_package`. Uploaded code is optional and replaceable; candidate tests never replace the selected reference.
+Authoring sessions expose `run_reference_program` for exploration, `update_hydro_authoring` for persistent staged authoring, quick/full `verify_hydro_authoring`, `build_hydro_problem`, `validate_hydro_package`, and the structured `request_hydro_clarification` gate. Uploaded code is optional and replaceable; candidate tests never replace the selected reference. User attachments are injected into the final package without making the model reproduce binary content.
 
-The authoring tool compiles a reference solution, independent oracle, C++ testlib generator and validator, known-wrong solutions, and an optional C++ testlib SPJ. It generates deterministic data, checks all input, runs samples and differential tests, tests validator rejection and checker probes, and requires wrong solutions to fail. Building uses the successful verification ID and case IDs to copy the exact verified bytes with matching resource limits. Failed verification blocks release; the executor can prompt up to two additional repair rounds if a model ends its turn prematurely.
+The Agent stores programs, testlib sources and case plans in small patches, so a failed component can be replaced without retransmitting the complete project. Quick verification checks a representative subset while the model repairs the project. Full verification compiles a reference solution, independent oracle, C++ testlib generator and validator, known-wrong solutions, and an optional C++ testlib SPJ. It generates deterministic data, checks all input, runs samples and differential tests, tests validator rejection and checker probes, and requires wrong solutions to fail. Identical program runs and project revisions reuse a SHA-256 keyed cache. Building uses the successful full-verification ID and case IDs to copy the exact verified bytes with matching resource limits.
 
 Private sources, seeds, data and reports live in `artifacts/<run-id>/authoring/<verification-id>/`. The separate authoring download includes these materials, the pinned testlib header and license, original statement and a SHA-256 manifest. The Hydro ZIP contains only judging files and public material; SPJ uses `checker_type: testlib` and `checker: checker.cc`. Interactive and partial-score/multi-pass checker workflows are not implemented. Local checks do not replace mathematical correctness arguments or live Hydro judging.
 
@@ -20,7 +20,7 @@ Keep Docker running. Override the image using `HYDRO_SANDBOX_IMAGE`. Runs use di
 
 The complete authoring tool supports 300 cases per project, 16 MiB per output stream, 64 MiB of final input/output data, and a 15-minute container deadline. Testlib is pinned to `1e4e8a24c79c6bad3becbdb5a332ffc352b7d5dd`. Rebuild the image after updating this checkout.
 
-Pi transcripts persist in `sessions/<run-id>/`. Clarifications resume the same transcript, and legacy tasks without a transcript reconstruct context from the original source and saved conversation.
+Pi transcripts persist in `sessions/<run-id>/`. Only a successful `request_hydro_clarification` tool call moves a task to `needs_input`; plain text, provider errors, and output-length exhaustion are failures that can be retried without pretending the statement is incomplete. Clarifications resume the same transcript, and legacy tasks without a transcript reconstruct context from the original source and saved conversation.
 
 Run the opt-in Docker tests from this package directory:
 

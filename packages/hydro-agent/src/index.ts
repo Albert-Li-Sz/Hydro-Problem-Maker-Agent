@@ -1,3 +1,4 @@
+export type { HydroAgentAttachment } from "./attachments.ts";
 export { buildAuthoringArchive } from "./authoring-archive.ts";
 export type {
 	AuthoringEvidence,
@@ -19,6 +20,7 @@ export type {
 	HydroAgentExecutionInput,
 	HydroAgentExecutionOutcome,
 	HydroAgentExecutor,
+	HydroAgentPhase,
 	HydroAgentProgressEvent,
 	HydroAgentReadiness,
 	HydroConversationMessage,

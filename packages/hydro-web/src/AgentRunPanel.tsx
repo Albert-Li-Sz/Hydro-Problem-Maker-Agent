@@ -1,6 +1,7 @@
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { type AgentRun, agentStatusLabel, apiUrl, isTerminalAgentRun } from "./platform.ts";
+import { type AgentRun, type AuthoringReport, agentStatusLabel, apiUrl, isTerminalAgentRun } from "./platform.ts";
 
 interface Props {
 	run: AgentRun;
@@ -14,12 +15,50 @@ interface Props {
 	onContinue: (message: string) => Promise<boolean>;
 	onCancel: () => void;
 	onEditProgram: () => void;
+	liveHydroConfigured: boolean;
+	liveBusy: boolean;
+	onLiveVerify: () => void;
+}
+
+function useElapsed(startedAt: string | undefined, active: boolean): string {
+	const [, setTick] = useState(0);
+	useEffect(() => {
+		if (!active || !startedAt) return;
+		const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+		return () => window.clearInterval(timer);
+	}, [active, startedAt]);
+	if (!startedAt) return "";
+	const seconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 export function AgentRunPanel(props: Props) {
 	const { message, onMessageChange: setMessage } = props;
 	const { run } = props;
 	const canContinue = ["needs_input", "failed", "cancelled"].includes(run.status);
+	const [report, setReport] = useState<AuthoringReport>();
+	const [reportMessage, setReportMessage] = useState("");
+	const elapsed = useElapsed(run.phaseStartedAt, run.status === "running");
+	async function loadReport(): Promise<void> {
+		setReportMessage("正在读取完整验证报告……");
+		try {
+			const response = await fetch(apiUrl(props.apiOrigin, `/runs/${run.id}/authoring-report`));
+			const body = (await response.json()) as unknown;
+			if (!response.ok) {
+				const message =
+					typeof body === "object" &&
+					body !== null &&
+					typeof (body as Record<string, unknown>).message === "string"
+						? String((body as Record<string, unknown>).message)
+						: "报告读取失败。";
+				throw new Error(message);
+			}
+			setReport(body as AuthoringReport);
+			setReportMessage("");
+		} catch (error) {
+			setReportMessage(error instanceof Error ? error.message : "报告读取失败。");
+		}
+	}
 	return (
 		<section className={`agent-run-panel ${props.className}`}>
 			<div className="agent-run-heading">
@@ -29,6 +68,13 @@ export function AgentRunPanel(props: Props) {
 				</div>
 				<code>{run.id}</code>
 			</div>
+			{run.phaseMessage && (run.status === "running" || run.status === "queued") && (
+				<output className="agent-phase">
+					<span className="notice-dot" />
+					<strong>{run.phaseMessage}</strong>
+					{elapsed && <time>{elapsed}</time>}
+				</output>
+			)}
 			{(run.conversation?.length ?? 0) > 0 && (
 				<details className="conversation-history">
 					<summary>此前对话（{run.conversation?.length} 条）</summary>
@@ -116,6 +162,11 @@ export function AgentRunPanel(props: Props) {
 						下载 Hydro 包
 					</a>
 				)}
+				{run.status === "succeeded" && run.artifact?.authoring && props.liveHydroConfigured && (
+					<button type="button" onClick={props.onLiveVerify} disabled={props.liveBusy}>
+						{props.liveBusy ? "Hydro 实测中…" : "运行 Hydro 实测"}
+					</button>
+				)}
 			</div>
 			{run.artifact?.authoring && (
 				<section className="sandbox-results">
@@ -130,16 +181,44 @@ export function AgentRunPanel(props: Props) {
 							? `C++ testlib SPJ · ${run.artifact.authoring.checkerProbes} 个判定探针通过`
 							: "Hydro 默认比较器"}
 					</p>
-					<details>
-						<summary>查看执行记录</summary>
-						{run.artifact.authoring.checks.map((check, index) => (
-							<div key={`${check.stage}-${index}`}>
-								{check.passed ? "✓" : "!"} {check.stage}
-								{check.caseId ? ` · ${check.caseId}` : ""}
-								<pre>{check.message}</pre>
-							</div>
-						))}
-					</details>
+					<div className="report-actions">
+						<button type="button" onClick={() => void loadReport()} disabled={report !== undefined}>
+							{report ? "完整报告已加载" : "加载完整执行记录"}
+						</button>
+						{reportMessage && <span>{reportMessage}</span>}
+					</div>
+					{report && (
+						<details open>
+							<summary>执行记录（{report.checks.length} 项）</summary>
+							{report.checks.map((check, index) => (
+								<div key={`${check.stage}-${index}`}>
+									{check.passed ? "✓" : "!"} {check.stage}
+									{check.caseId ? ` · ${check.caseId}` : ""}
+									<pre>{check.message}</pre>
+								</div>
+							))}
+						</details>
+					)}
+				</section>
+			)}
+			{run.artifact?.liveVerification && (
+				<section className={`sandbox-results ${run.artifact.liveVerification.success ? "passed" : "failed"}`}>
+					<strong>
+						{run.artifact.liveVerification.success ? "真实 Hydro 实测通过" : "真实 Hydro 实测未通过"}
+					</strong>
+					<p>{run.artifact.liveVerification.message}</p>
+					<p>
+						标程 {run.artifact.liveVerification.reference.verdict}
+						{run.artifact.liveVerification.reference.score === undefined
+							? ""
+							: ` / ${run.artifact.liveVerification.reference.score} 分`}
+						· {run.artifact.liveVerification.wrongPrograms.length} 个错误程序已提交
+					</p>
+					{run.artifact.liveVerification.problemUrl && (
+						<a href={run.artifact.liveVerification.problemUrl} target="_blank" rel="noreferrer">
+							打开 Hydro 题目
+						</a>
+					)}
 				</section>
 			)}
 		</section>

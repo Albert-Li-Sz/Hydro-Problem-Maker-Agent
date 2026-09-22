@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HydroAgentExecutor } from "@hydro-problem-make/agent";
@@ -10,6 +10,37 @@ function fakeExecutor(execute: HydroAgentExecutor["execute"]): HydroAgentExecuto
 }
 
 describe("HydroRunManager", () => {
+	it("keeps the list index compact, stores details per run and drops streamed deltas after completion", async () => {
+		const root = await mkdtemp(join(tmpdir(), "hydro-compact-"));
+		try {
+			let receivedAttachments: unknown;
+			const manager = new HydroRunManager(
+				fakeExecutor(async (input) => {
+					receivedAttachments = input.attachments;
+					input.onEvent({ type: "phase", phase: "authoring", message: "生成工程" });
+					for (let index = 0; index < 1000; index++)
+						input.onEvent({ type: "text_delta", delta: `large streamed response ${index}\n` });
+					return { status: "failed", model: "fake/model", assistantText: "final response" };
+				}),
+				join(root, "runs.json"),
+			);
+			const attachments = [{ name: "diagram.png", contentBase64: "aGVsbG8=" }];
+			const run = manager.create(`# Compact\n${"source ".repeat(1000)}`, undefined, attachments);
+			await vi.waitFor(() => expect(manager.get(run.id)?.status).toBe("failed"));
+			expect(receivedAttachments).toEqual(attachments);
+			const index = await readFile(join(root, "runs.json"), "utf8");
+			expect(index.length).toBeLessThan(3000);
+			expect(index).not.toContain("large streamed response");
+			expect(index).not.toContain("source ".repeat(100));
+			const record = await readFile(join(root, "run-records", `${run.id}.json`), "utf8");
+			expect(record).toContain("final response");
+			expect(record).not.toContain("large streamed response");
+			expect(manager.getEvents(run.id)?.some((event) => event.type === "text_delta")).toBe(false);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("deletes a terminal record and only its private files, including across restart", async () => {
 		const root = await mkdtemp(join(tmpdir(), "hydro-delete-"));
 		try {

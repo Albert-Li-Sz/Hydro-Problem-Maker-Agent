@@ -7,6 +7,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@earendil-works/pi-coding-agent";
+import type { HydroAgentAttachment } from "./attachments.ts";
 import type { HydroReferenceProgram, HydroSandbox } from "./sandbox.ts";
 import { createHydroAuthoringTools } from "./tools.ts";
 
@@ -22,6 +23,7 @@ export interface HydroAuthoringSessionOptions extends HydroAuthoringResourceOpti
 	sessionManager?: SessionManager;
 	sandbox?: HydroSandbox;
 	referenceProgram?: HydroReferenceProgram;
+	attachments?: HydroAgentAttachment[];
 }
 
 export async function loadHydroAuthoringResources(
@@ -41,7 +43,7 @@ export async function loadHydroAuthoringResources(
 			skills: resources.skills.filter((skill) => skill.name === "hydro-problem-authoring"),
 			diagnostics: resources.diagnostics,
 		}),
-		systemPrompt: `You author Hydro programming problems. Follow the hydro-problem-authoring Skill and use only the enabled tools. Reply in Chinese. When the statement determines valid input and output, do not spend the response on analysis: immediately call verify_hydro_authoring with a complete project, fix its reported failures, then call build_hydro_problem. Ask only about unresolved semantics that make judging impossible. The Skill reference is preloaded below:\n\n${contract}`,
+		systemPrompt: `You author Hydro programming problems. Follow the hydro-problem-authoring Skill and use only the enabled tools. Reply in Chinese. Keep reasoning concise. Stage the project through several small update_hydro_authoring calls, run quick verification, repair only failed sections, then run full verification and build. Only request missing semantics through request_hydro_clarification. The Skill reference is preloaded below:\n\n${contract}`,
 	});
 	await loader.reload();
 	const resources = loader.getSkills();

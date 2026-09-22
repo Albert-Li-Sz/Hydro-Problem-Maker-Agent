@@ -9,6 +9,7 @@ checks, data = [], []
 commands = {}
 languages = {}
 total_bytes = 0
+mode = payload.get('verificationMode', 'full')
 
 def record(stage, passed, message='', case_id=None):
     checks.append({'stage': stage, 'caseId': case_id, 'passed': passed, 'message': message[:4000]})
@@ -78,31 +79,39 @@ def main():
     for role, program in programs.items():
         if not compile_program(role, program):
             return
-    for index, text in enumerate(payload['invalidInputs']):
+    invalid_inputs = payload['invalidInputs'] if mode == 'full' else payload['invalidInputs'][:8]
+    for index, text in enumerate(invalid_inputs):
         invalid = run_program('validator', text, root / ('invalid-' + str(index)))
         record('validator-negative', invalid['status'] == 'runtime_error' and invalid['exitCode'] == 3
                and invalid['stderr'].startswith('FAIL'), detail(invalid), str(index + 1))
     killed = set()
-    for case in payload['cases']:
+    cases = payload['cases']
+    if mode == 'quick':
+        preferred = [case for case in cases if case.get('purpose') == 'sample' or case.get('oracle')]
+        cases = (preferred + [case for case in cases if case not in preferred])[:8]
+    for case in cases:
         case_id = case['id']
         directory = root / ('case-' + case_id)
         directory.mkdir()
         text = case.get('input', '')
         if 'generatorArgs' in case:
             gen = run_program('generator', '', directory / 'generate', args=case['generatorArgs'])
-            if not record('generator', gen['status'] == 'ok', detail(gen), case_id):
+            if not record('generator', gen['status'] == 'ok',
+                          ('ok: ' + str(len(gen['stdout'].encode('utf-8'))) + ' bytes') if gen['status'] == 'ok' else detail(gen), case_id):
                 continue
             text = gen['stdout']
             repeated = run_program('generator', '', directory / 'repeat', args=case['generatorArgs'])
-            if not record('reproducibility', repeated['status'] == 'ok' and repeated['stdout'] == text, '固定参数重跑', case_id):
+            if not record('reproducibility', repeated['status'] == 'ok' and repeated['stdout'] == text,
+                          '固定参数重跑一致' if repeated['status'] == 'ok' and repeated['stdout'] == text else detail(repeated), case_id):
                 continue
         valid = run_program('validator', text, directory / 'validate')
-        if not record('validator', valid['status'] == 'ok', detail(valid), case_id):
+        if not record('validator', valid['status'] == 'ok', 'ok' if valid['status'] == 'ok' else detail(valid), case_id):
             continue
         time_ms = case.get('timeLimitMs', payload['timeLimitMs'])
         memory = case.get('memoryLimitMb', payload['memoryLimitMb'])
         ref = run_program('reference', text, directory / 'reference', time_ms / 1000, memory)
-        if not record('reference', ref['status'] == 'ok', detail(ref), case_id):
+        if not record('reference', ref['status'] == 'ok',
+                      ('ok: ' + str(len(ref['stdout'].encode('utf-8'))) + ' bytes, ' + str(ref['durationMs']) + ' ms') if ref['status'] == 'ok' else detail(ref), case_id):
             continue
         answer = ref['stdout']
         verdict, message = judge(text, answer, answer, directory / 'self-check')
@@ -114,7 +123,8 @@ def main():
             record('sample', verdict == 'accepted' and reverse == 'accepted', message + reverse_message or ('expected: ' + case['expectedOutput'][:500] + '\nactual: ' + answer[:500]), case_id)
         if case.get('oracle'):
             oracle = run_program('oracle', text, directory / 'oracle', 10, 512)
-            if record('oracle-run', oracle['status'] == 'ok', detail(oracle), case_id):
+            if record('oracle-run', oracle['status'] == 'ok',
+                      ('ok: ' + str(len(oracle['stdout'].encode('utf-8'))) + ' bytes') if oracle['status'] == 'ok' else detail(oracle), case_id):
                 verdict, message = judge(text, oracle['stdout'], answer, directory / 'oracle-check')
                 reverse, reverse_message = judge(text, answer, oracle['stdout'], directory / 'oracle-reverse')
                 record('oracle', verdict == 'accepted' and reverse == 'accepted', message or reverse_message or
@@ -145,14 +155,16 @@ def main():
         data.append({'id': case_id, 'input': text, 'output': answer, 'durationMs': ref['durationMs'],
                      'timeLimitMs': time_ms, 'memoryLimitMb': memory})
         shutil.rmtree(directory)
-    for index, item in enumerate(payload['wrongPrograms']):
-        if index not in killed:
-            record('wrong-program-survived', False, item['name'] + ': 所有测试点均通过，需要加强数据。')
+    if mode == 'full':
+        for index, item in enumerate(payload['wrongPrograms']):
+            if index not in killed:
+                record('wrong-program-survived', False, item['name'] + ': 所有测试点均通过，需要加强数据。')
 
 try:
     main()
 except Exception as error:
     record('infrastructure', False, str(error))
-print(json.dumps({'success': len(data) == len(payload['cases']) and all(item['passed'] for item in checks),
-                  'checks': checks, 'cases': data}, ensure_ascii=False))
+expected_cases = len(payload['cases']) if mode == 'full' else min(8, len(payload['cases']))
+print(json.dumps({'success': len(data) == expected_cases and all(item['passed'] for item in checks),
+                  'mode': mode, 'checks': checks, 'cases': data}, ensure_ascii=False))
 `;

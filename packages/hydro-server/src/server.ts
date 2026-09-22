@@ -13,6 +13,7 @@ import {
 	HydroProblemValidationError,
 	validateHydroProblemSpec,
 } from "@hydro-problem-make/authoring";
+import type { HydroLiveVerifier } from "./live-hydro.ts";
 import {
 	InvalidRequestError,
 	parseAgentRunRequest,
@@ -29,6 +30,7 @@ export interface HydroServerOptions {
 	runManager?: HydroRunManager;
 	aiConfiguration?: HydroAiConfigurationController;
 	sandbox?: HydroSandbox;
+	liveVerifier?: HydroLiveVerifier;
 }
 
 const contentTypes: Readonly<Record<string, string>> = {
@@ -113,7 +115,7 @@ async function serveStatic(response: ServerResponse, staticRoot: string, pathnam
 }
 
 export function createHydroServer(options: HydroServerOptions = {}): Server {
-	const maxRequestBytes = options.maxRequestBytes ?? 2 * 1024 * 1024;
+	const maxRequestBytes = options.maxRequestBytes ?? 12 * 1024 * 1024;
 	return createServer(async (request, response) => {
 		try {
 			const url = new URL(request.url ?? "/", "http://localhost");
@@ -148,6 +150,10 @@ export function createHydroServer(options: HydroServerOptions = {}): Server {
 						agentGeneration: readiness?.available ?? false,
 						agentModels: readiness?.models ?? [],
 						maxConcurrentRuns: options.runManager?.getMaxConcurrentRuns() ?? 0,
+						liveHydro: options.liveVerifier?.status() ?? {
+							configured: false,
+							message: "未配置真实 Hydro 实测适配器。",
+						},
 					},
 				});
 				return;
@@ -208,11 +214,15 @@ export function createHydroServer(options: HydroServerOptions = {}): Server {
 					});
 					return;
 				}
-				const { source, referenceProgram } = parseAgentRunRequest(await readJson(request, maxRequestBytes));
-				sendJson(response, 202, options.runManager.create(source, referenceProgram));
+				const { source, referenceProgram, attachments } = parseAgentRunRequest(
+					await readJson(request, maxRequestBytes),
+				);
+				sendJson(response, 202, options.runManager.create(source, referenceProgram, attachments));
 				return;
 			}
-			const runRoute = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(events|cancel|archive|continue|authoring))?$/);
+			const runRoute = url.pathname.match(
+				/^\/api\/runs\/([^/]+)(?:\/(events|cancel|archive|continue|authoring|authoring-report|live-verify))?$/,
+			);
 			if (runRoute !== null) {
 				const manager = options.runManager;
 				if (manager === undefined) {
@@ -228,6 +238,66 @@ export function createHydroServer(options: HydroServerOptions = {}): Server {
 				}
 				if (request.method === "GET" && action === undefined) {
 					sendJson(response, 200, run);
+					return;
+				}
+				if (request.method === "GET" && action === "authoring-report") {
+					const evidence = manager.getAuthoringEvidence(runId);
+					if (!evidence) {
+						sendJson(response, 404, {
+							error: "AUTHORING_REPORT_NOT_FOUND",
+							message: "该任务没有可读取的完整制题验证报告。",
+						});
+						return;
+					}
+					sendJson(response, 200, {
+						...evidence.report,
+						checks: evidence.report.checks.map((check) => ({
+							...check,
+							message:
+								check.message.length > (check.passed ? 500 : 2000)
+									? `${check.message.slice(0, check.passed ? 500 : 2000)}\n…（已截断）`
+									: check.message,
+						})),
+						cases: evidence.report.cases.map(({ id, durationMs, timeLimitMs, memoryLimitMb }) => ({
+							id,
+							durationMs,
+							timeLimitMs,
+							memoryLimitMb,
+						})),
+					});
+					return;
+				}
+				if (request.method === "POST" && action === "live-verify") {
+					if (!options.liveVerifier) {
+						sendJson(response, 503, {
+							error: "LIVE_HYDRO_UNAVAILABLE",
+							message: "未配置真实 Hydro 实测适配器。",
+						});
+						return;
+					}
+					const liveRequest = manager.getLiveVerificationRequest(runId);
+					if (!liveRequest) {
+						sendJson(response, 409, {
+							error: "LIVE_HYDRO_NOT_READY",
+							message: "需要先完成完整制题验证和 Hydro 打包。",
+						});
+						return;
+					}
+					const controller = new AbortController();
+					response.once("close", () => {
+						if (!response.writableEnded) controller.abort();
+					});
+					try {
+						const result = await options.liveVerifier.verify(liveRequest, controller.signal);
+						manager.setLiveVerification(runId, result);
+						sendJson(response, 200, result);
+					} catch (error) {
+						if (!response.destroyed)
+							sendJson(response, 502, {
+								error: "LIVE_HYDRO_FAILED",
+								message: error instanceof Error ? error.message : "Hydro 实测失败。",
+							});
+					}
 					return;
 				}
 				if (request.method === "DELETE" && action === undefined) {
