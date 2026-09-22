@@ -1,0 +1,33 @@
+{
+	"name": "@hydro-problem-make/web",
+	"version": "0.1.0",
+	"description": "Hydro-style authoring workspace for Hydro Problem Make",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"test": "vitest --run"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"license": "UNLICENSED",
+	"dependencies": {
+		"katex": "0.18.7",
+		"react": "19.3.0",
+		"react-dom": "19.3.0",
+		"react-markdown": "10.1.0",
+		"rehype-katex": "7.0.1",
+		"remark-gfm": "4.0.1",
+		"remark-math": "6.0.0"
+	},
+	"devDependencies": {
+		"@types/react": "19.3.0",
+		"@types/react-dom": "19.3.0",
+		"@vitejs/plugin-react": "6.1.1",
+		"vite": "8.3.0",
+		"vitest": "4.1.9"
+	}
+}

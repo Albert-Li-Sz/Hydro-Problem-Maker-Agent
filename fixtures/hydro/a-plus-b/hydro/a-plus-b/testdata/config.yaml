@@ -1,0 +1,15 @@
+type: default
+checker_type: default
+time: 1s
+memory: 256m
+subtasks:
+  - id: 1
+    type: sum
+    score: 100
+    cases:
+      - input: 1.in
+        output: 1.out
+      - input: 2.in
+        output: 2.out
+      - input: 3.in
+        output: 3.out

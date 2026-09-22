@@ -1,0 +1,41 @@
+{
+	"name": "@hydro-problem-make/server",
+	"version": "0.1.0",
+	"description": "HTTP API for Hydro Problem Make",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"sideEffects": false,
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"dev": "tsx src/cli.ts",
+		"test": "vitest --run",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"license": "UNLICENSED",
+	"dependencies": {
+		"@hydro-problem-make/agent": "0.1.0",
+		"@hydro-problem-make/authoring": "0.1.0"
+	},
+	"devDependencies": {
+		"shx": "0.4.0",
+		"tsx": "4.22.1",
+		"vitest": "4.1.9"
+	}
+}
